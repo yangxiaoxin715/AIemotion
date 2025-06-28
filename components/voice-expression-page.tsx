@@ -1,9 +1,9 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Mic, MicOff, RotateCcw, CheckCircle, AlertCircle } from "lucide-react"
+import { Mic, MicOff, RotateCcw, CheckCircle, AlertCircle, X } from "lucide-react"
 import AudioWaveform from "@/components/audio-waveform"
 import VoiceTranscriptDisplay from "@/components/voice-transcript-display"
 import type { EmotionData } from "@/app/page"
@@ -13,6 +13,8 @@ interface VoiceExpressionPageProps {
   onComplete: (data: EmotionData, sessionInfo: { sessionNumber: number; shouldGenerateReport: boolean }) => void
 }
 
+type ErrorType = 'permission' | 'not-supported' | 'network' | 'general' | null
+
 export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageProps) {
   const [isRecording, setIsRecording] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
@@ -21,42 +23,93 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
   const [isSupported, setIsSupported] = useState(true)
   const [audioLevel, setAudioLevel] = useState(0)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [permissionDenied, setPermissionDenied] = useState(false)
+  const [error, setError] = useState<{ type: ErrorType; message: string } | null>(null)
 
   const recognitionRef = useRef<any>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
+  const restartAttemptsRef = useRef(0)
+  const isCleaningUpRef = useRef(false)
+
+  const MAX_RESTART_ATTEMPTS = 3
+
+  const cleanup = useCallback(() => {
+    if (isCleaningUpRef.current) return
+    isCleaningUpRef.current = true
+
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+    
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop()
+      } catch (e) {
+        // 忽略停止时的错误
+      }
+      recognitionRef.current = null
+    }
+    
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
+    }
+    
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      try {
+        audioContextRef.current.close()
+      } catch (e) {
+        // 忽略关闭时的错误
+      }
+      audioContextRef.current = null
+    }
+    
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop()
+        } catch (e) {
+          // 忽略停止时的错误
+        }
+      })
+      streamRef.current = null
+    }
+
+    setAudioLevel(0)
+    restartAttemptsRef.current = 0
+    isCleaningUpRef.current = false
+  }, [])
+
+  const showError = useCallback((type: ErrorType, message: string) => {
+    setError({ type, message })
+    setIsRecording(false)
+    setIsPaused(false)
+  }, [])
+
+  const clearError = useCallback(() => {
+    setError(null)
+  }, [])
 
   useEffect(() => {
     // 检查浏览器支持
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
       setIsSupported(false)
+      showError('not-supported', '您的浏览器不支持语音识别功能，请使用Chrome、Edge或Safari浏览器')
     }
 
     return () => {
       cleanup()
     }
-  }, [])
+  }, [cleanup, showError])
 
-  const cleanup = () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current)
-    }
-    if (recognitionRef.current) {
-      recognitionRef.current.stop()
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop())
-    }
-  }
-
-  const startTimer = () => {
+  const startTimer = useCallback(() => {
+    if (timerRef.current) return
+    
     timerRef.current = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -66,143 +119,218 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
         return prev - 1
       })
     }, 1000)
-  }
+  }, [])
 
-  const stopTimer = () => {
+  const stopTimer = useCallback(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current)
       timerRef.current = null
     }
-  }
+  }, [])
 
-  const startRecording = async () => {
-    if (!isSupported) {
-      alert("您的浏览器不支持语音识别功能，请使用现代浏览器")
+  const updateAudioLevel = useCallback(() => {
+    if (!analyserRef.current || !isRecording || isPaused || isCleaningUpRef.current) {
       return
     }
 
     try {
-      // 请求麦克风权限
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
+      const bufferLength = analyserRef.current.frequencyBinCount
+      const dataArray = new Uint8Array(bufferLength)
+      analyserRef.current.getByteFrequencyData(dataArray)
+      const average = dataArray.reduce((a, b) => a + b) / dataArray.length
+      setAudioLevel(average / 255)
+      
+      animationFrameRef.current = requestAnimationFrame(updateAudioLevel)
+    } catch (error) {
+      console.error("音频级别更新错误:", error)
+    }
+  }, [isRecording, isPaused])
 
-      // 设置语音识别
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-      recognitionRef.current = new SpeechRecognition()
-
-      recognitionRef.current.continuous = true
-      recognitionRef.current.interimResults = true
-      recognitionRef.current.lang = "zh-CN"
-
-      recognitionRef.current.onresult = (event: any) => {
-        let finalTranscript = ""
-        let interimTranscript = ""
-
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript
-          } else {
-            interimTranscript += transcript
-          }
-        }
-
-        if (finalTranscript) {
-          setTranscript((prev) => prev + finalTranscript)
-        }
-      }
-
-      recognitionRef.current.onerror = (event: any) => {
-        console.error("语音识别错误:", event.error)
-        if (event.error === "not-allowed") {
-          setPermissionDenied(true)
-          setIsRecording(false)
-        }
-      }
-
-      recognitionRef.current.onend = () => {
-        if (isRecording && !isPaused) {
-          // 如果还在录音状态但识别结束了，重新启动
-          setTimeout(() => {
-            if (recognitionRef.current && isRecording) {
-              recognitionRef.current.start()
-            }
-          }, 100)
-        }
-      }
-
-      // 设置音频可视化
+  const setupAudioVisualization = useCallback(async (stream: MediaStream) => {
+    try {
       audioContextRef.current = new AudioContext()
       analyserRef.current = audioContextRef.current.createAnalyser()
       const source = audioContextRef.current.createMediaStreamSource(stream)
       source.connect(analyserRef.current)
 
       analyserRef.current.fftSize = 256
-      const bufferLength = analyserRef.current.frequencyBinCount
-      const dataArray = new Uint8Array(bufferLength)
+      updateAudioLevel()
+    } catch (error) {
+      console.error("音频可视化设置失败:", error)
+    }
+  }, [updateAudioLevel])
 
-      const updateAudioLevel = () => {
-        if (analyserRef.current && isRecording) {
-          analyserRef.current.getByteFrequencyData(dataArray)
-          const average = dataArray.reduce((a, b) => a + b) / dataArray.length
-          setAudioLevel(average / 255)
-          requestAnimationFrame(updateAudioLevel)
+  const setupSpeechRecognition = useCallback(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SpeechRecognition) return null
+
+    const recognition = new SpeechRecognition()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = "zh-CN"
+
+    recognition.onresult = (event: any) => {
+      let finalTranscript = ""
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript
         }
       }
 
-      recognitionRef.current.start()
+      if (finalTranscript) {
+        setTranscript((prev) => prev + finalTranscript)
+      }
+    }
+
+    recognition.onerror = (event: any) => {
+      console.error("语音识别错误:", event.error)
+      
+      switch (event.error) {
+        case "not-allowed":
+          showError('permission', '需要麦克风权限才能使用语音功能，请在浏览器设置中允许访问麦克风')
+          break
+        case "network":
+          showError('network', '网络连接问题，请检查网络后重试')
+          break
+        case "no-speech":
+          // 这个错误可以忽略，不显示给用户
+          break
+        default:
+          if (restartAttemptsRef.current < MAX_RESTART_ATTEMPTS) {
+            // 不显示错误，尝试重启
+            break
+          }
+          showError('general', `语音识别出现问题: ${event.error}`)
+      }
+    }
+
+    recognition.onend = () => {
+      if (isRecording && !isPaused && restartAttemptsRef.current < MAX_RESTART_ATTEMPTS && !isCleaningUpRef.current) {
+        restartAttemptsRef.current++
+        setTimeout(() => {
+          if (recognitionRef.current && isRecording && !isCleaningUpRef.current) {
+            try {
+              recognitionRef.current.start()
+            } catch (error) {
+              console.error("重启语音识别失败:", error)
+              if (restartAttemptsRef.current >= MAX_RESTART_ATTEMPTS) {
+                showError('general', '语音识别连接不稳定，请重新开始')
+              }
+            }
+          }
+        }, 1000)
+      }
+    }
+
+    return recognition
+  }, [isRecording, isPaused, showError])
+
+  const startRecording = async () => {
+    if (!isSupported) {
+      showError('not-supported', '您的浏览器不支持语音识别功能')
+      return
+    }
+
+    clearError()
+    
+    try {
+      // 请求麦克风权限
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      })
+      streamRef.current = stream
+
+      // 设置语音识别
+      const recognition = setupSpeechRecognition()
+      if (!recognition) {
+        throw new Error('无法创建语音识别实例')
+      }
+      recognitionRef.current = recognition
+
+      // 设置音频可视化
+      await setupAudioVisualization(stream)
+
+      recognition.start()
       setIsRecording(true)
       setIsPaused(false)
-      setPermissionDenied(false)
+      restartAttemptsRef.current = 0
       startTimer()
-      updateAudioLevel()
-    } catch (error) {
+
+    } catch (error: any) {
       console.error("启动录音失败:", error)
-      setPermissionDenied(true)
-      alert("无法访问麦克风，请检查权限设置")
+      
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        showError('permission', '需要麦克风权限才能使用语音功能，请在浏览器设置中允许访问麦克风')
+      } else if (error.name === 'NotFoundError') {
+        showError('general', '未找到可用的麦克风设备')
+      } else {
+        showError('general', '启动录音失败，请检查设备和权限设置')
+      }
     }
   }
 
-  const pauseRecording = () => {
+  const pauseRecording = useCallback(() => {
     if (recognitionRef.current && isRecording) {
-      recognitionRef.current.stop()
-      setIsPaused(true)
-      stopTimer()
+      try {
+        recognitionRef.current.stop()
+        setIsPaused(true)
+        stopTimer()
+      } catch (error) {
+        console.error("暂停录音失败:", error)
+      }
     }
-  }
+  }, [isRecording, stopTimer])
 
-  const resumeRecording = () => {
+  const resumeRecording = useCallback(() => {
     if (isPaused && recognitionRef.current) {
-      recognitionRef.current.start()
-      setIsPaused(false)
-      startTimer()
+      try {
+        recognitionRef.current.start()
+        setIsPaused(false)
+        restartAttemptsRef.current = 0
+        startTimer()
+      } catch (error) {
+        console.error("恢复录音失败:", error)
+        showError('general', '恢复录音失败，请重新开始')
+      }
     }
-  }
+  }, [isPaused, startTimer, showError])
 
-  const stopRecording = () => {
+  const stopRecording = useCallback(() => {
     if (recognitionRef.current) {
-      recognitionRef.current.stop()
+      try {
+        recognitionRef.current.stop()
+      } catch (error) {
+        console.error("停止录音失败:", error)
+      }
     }
     setIsRecording(false)
     setIsPaused(false)
     stopTimer()
     setAudioLevel(0)
-  }
+  }, [stopTimer])
 
-  const resetRecording = () => {
-    stopRecording()
+  const resetRecording = useCallback(() => {
+    cleanup()
     setTranscript("")
     setTimeLeft(300)
-  }
+    clearError()
+  }, [cleanup, clearError])
 
   const handleComplete = async () => {
     if (!transcript.trim()) {
-      alert("请先表达一些内容再继续")
+      showError('general', '请先表达一些内容再继续')
       return
     }
 
     stopRecording()
     setIsAnalyzing(true)
+    clearError()
 
     try {
       // 获取AI分析结果
@@ -216,6 +344,7 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
     } catch (error) {
       console.error("分析失败:", error)
       setIsAnalyzing(false)
+      showError('general', '分析过程中出现问题，请重试')
     }
   }
 
@@ -228,10 +357,11 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(30000), // 30秒超时
       })
 
       if (!response.ok) {
-        const errorData = await response.json()
+        const errorData = await response.json().catch(() => ({ error: '请求失败' }))
         throw new Error(errorData.error || '分析请求失败')
       }
 
@@ -244,7 +374,7 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
       let errorMessage = "AI分析暂时不可用，已为您提供基础分析结果"
       
       if (error instanceof Error) {
-        if (error.message.includes('timeout') || error.message.includes('504')) {
+        if (error.name === 'AbortError' || error.message.includes('timeout')) {
           errorMessage = "网络连接超时，已为您提供基础分析结果"
         } else if (error.message.includes('401')) {
           errorMessage = "API配置问题，已为您提供基础分析结果"
@@ -252,7 +382,7 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
       }
       
       // 显示友好的错误提示
-      alert(`⚠️ ${errorMessage}\n\n💡 建议：\n• 检查网络连接\n• 稍后重试\n• 或联系技术支持`)
+      showError('network', `⚠️ ${errorMessage}`)
       
       // 如果API调用失败，使用备用分析
       return {
@@ -275,81 +405,16 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
         growthSummary: {
           discovered: "你发现了自己有勇气面对和表达内心的感受，这是自我成长的重要能力",
           reminder: "记住，每一次真诚的表达都是成长，给自己一些耐心和关爱"
-        }
+        },
+        suggestedBenefits: [
+          "你有勇气面对和表达真实的感受",
+          "你正在主动寻求自我理解和成长",
+          "你愿意花时间关注自己的内心世界",
+          "你有自我觉察的能力和意愿"
+        ],
+        selectedBenefits: []
       }
     }
-  }
-
-  const extractEmotionWords = (text: string) => {
-    const emotions = [
-      "焦虑",
-      "担心",
-      "紧张",
-      "压力",
-      "累",
-      "疲惫",
-      "开心",
-      "兴奋",
-      "满足",
-      "失望",
-      "沮丧",
-      "愤怒",
-      "害怕",
-      "孤独",
-      "困惑",
-      "无助",
-      "烦躁",
-      "放松",
-    ]
-    const wordCounts: { [key: string]: number } = {}
-
-    emotions.forEach((emotion) => {
-      const regex = new RegExp(emotion, "g")
-      const matches = text.match(regex)
-      if (matches) {
-        wordCounts[emotion] = matches.length
-      }
-    })
-
-    return Object.entries(wordCounts)
-      .map(([word, count]) => ({ word, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 6)
-  }
-
-  const generateInsights = (text: string) => {
-    const insights = [
-      "你在表达中提到了多个关于压力的词汇，这可能反映了你当前面临的挑战",
-      "从你的语言中能感受到你很在意结果，这显示了你的责任心",
-      "你提到的情绪词汇显示了内心的复杂感受，这是很正常的",
-      "尽管有困难，你仍在寻找表达的方式，这显示了你的勇气",
-    ]
-
-    // 根据文本内容选择相关的洞察
-    return insights.slice(0, 3 + Math.floor(Math.random() * 2))
-  }
-
-  const generatePersonalizedQuestions = (text: string) => {
-    // 基础四问
-    const questions = {
-      feeling: "基于你的表达，你现在主要的感受是什么？",
-      needs: "在这些感受背后，你可能需要什么？",
-      challenges: "当前最主要的挑战是什么？",
-      insights: "有什么是你之前没有注意到的吗？",
-    }
-
-    // 个性化调整
-    if (text.includes("工作") || text.includes("职场")) {
-      questions.feeling = "面对工作压力，你的核心感受是什么？"
-      questions.needs = "在职场中，你希望获得什么样的支持？"
-    }
-
-    if (text.includes("孩子") || text.includes("家庭")) {
-      questions.feeling = "作为家长，你现在的主要感受是什么？"
-      questions.needs = "在育儿过程中，你可能需要什么样的支持？"
-    }
-
-    return questions
   }
 
   const formatTime = (seconds: number) => {
@@ -360,6 +425,28 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
 
   const getProgressPercentage = () => {
     return ((300 - timeLeft) / 300) * 100
+  }
+
+  const getErrorIcon = (type: ErrorType) => {
+    switch (type) {
+      case 'permission':
+        return <Mic className="w-5 h-5" />
+      case 'network':
+        return <AlertCircle className="w-5 h-5" />
+      default:
+        return <AlertCircle className="w-5 h-5" />
+    }
+  }
+
+  const getErrorColor = (type: ErrorType) => {
+    switch (type) {
+      case 'permission':
+        return 'bg-yellow-100 border-yellow-400 text-yellow-800'
+      case 'network':
+        return 'bg-blue-100 border-blue-400 text-blue-800'
+      default:
+        return 'bg-red-100 border-red-400 text-red-700'
+    }
   }
 
   if (isAnalyzing) {
@@ -387,14 +474,39 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
           <p className="text-xl text-gray-600">想到什么说什么，不用组织语言</p>
         </div>
 
+        {/* 错误提示 */}
+        {error && (
+          <div className={`mb-6 p-4 rounded-lg border flex items-start space-x-3 ${getErrorColor(error.type)}`}>
+            {getErrorIcon(error.type)}
+            <div className="flex-1">
+              <p className="font-medium">{error.message}</p>
+              {error.type === 'permission' && (
+                <p className="text-sm mt-2">
+                  💡 解决方法：点击浏览器地址栏的🔒图标，允许麦克风访问权限
+                </p>
+              )}
+            </div>
+            <Button
+              onClick={clearError}
+              variant="ghost"
+              size="sm"
+              className="text-current hover:bg-black/10"
+            >
+              <X className="w-4 h-4" />
+            </Button>
+          </div>
+        )}
+
         {/* 时间显示 */}
         <div className="flex justify-between items-center mb-8">
           <div className="text-3xl font-bold text-orange-600">⏰ {formatTime(timeLeft)}</div>
-
-          {permissionDenied && (
-            <div className="flex items-center text-red-600">
-              <AlertCircle className="w-5 h-5 mr-2" />
-              <span className="text-sm">需要麦克风权限</span>
+          
+          {isRecording && (
+            <div className="flex items-center text-green-600">
+              <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse mr-2"></div>
+              <span className="text-sm font-medium">
+                {isPaused ? '已暂停' : '录音中'}
+              </span>
             </div>
           )}
         </div>
@@ -408,13 +520,13 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
                 <div className="relative">
                   <Button
                     onClick={isRecording ? (isPaused ? resumeRecording : pauseRecording) : startRecording}
-                    disabled={!isSupported || permissionDenied}
+                    disabled={!isSupported || (error?.type === 'permission')}
                     className={`w-32 h-32 rounded-full text-white font-semibold text-lg shadow-2xl transition-all duration-300 ${
                       isRecording && !isPaused
                         ? "bg-gradient-to-r from-red-500 to-red-600 animate-pulse scale-110"
                         : isPaused
                           ? "bg-gradient-to-r from-yellow-500 to-orange-500 hover:scale-105"
-                          : "bg-gradient-to-r from-gray-400 to-gray-500 hover:from-blue-500 hover:to-purple-500 hover:scale-105"
+                          : "bg-gradient-to-r from-gray-400 to-gray-500 hover:from-blue-500 hover:to-purple-500 hover:scale-105 disabled:hover:scale-100 disabled:hover:from-gray-400 disabled:hover:to-gray-500"
                     }`}
                   >
                     {isRecording && !isPaused ? <MicOff className="w-8 h-8" /> : <Mic className="w-8 h-8" />}
@@ -461,7 +573,9 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
                   : isPaused
                     ? "录音已暂停，点击继续"
                     : isSupported
-                      ? "点击开始录音"
+                      ? error?.type === 'permission' 
+                        ? "请允许麦克风权限后开始录音"
+                        : "点击开始录音"
                       : "浏览器不支持语音功能"}
               </p>
             </div>
@@ -487,8 +601,8 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
 
           <Button
             onClick={handleComplete}
-            disabled={!transcript.trim()}
-            className="bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white rounded-xl px-8 py-3 text-lg shadow-lg"
+            disabled={!transcript.trim() || isAnalyzing}
+            className="bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white rounded-xl px-8 py-3 text-lg shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CheckCircle className="w-5 h-5 mr-2" />
             完成表达
