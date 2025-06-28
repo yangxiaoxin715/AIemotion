@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Mic, MicOff, RotateCcw, CheckCircle, AlertCircle, X } from "lucide-react"
+import { Mic, MicOff, RotateCcw, CheckCircle, AlertCircle, X, Smartphone, Monitor } from "lucide-react"
 import AudioWaveform from "@/components/audio-waveform"
 import VoiceTranscriptDisplay from "@/components/voice-transcript-display"
 import type { EmotionData } from "@/app/page"
@@ -13,7 +13,52 @@ interface VoiceExpressionPageProps {
   onComplete: (data: EmotionData, sessionInfo: { sessionNumber: number; shouldGenerateReport: boolean }) => void
 }
 
-type ErrorType = 'permission' | 'not-supported' | 'network' | 'general' | null
+type ErrorType = 'permission' | 'not-supported' | 'network' | 'general' | 'https-required' | 'mobile-not-supported' | null
+
+// 设备检测
+const isMobile = () => {
+  if (typeof window === 'undefined') return false
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+}
+
+const isIOS = () => {
+  if (typeof window === 'undefined') return false
+  return /iPad|iPhone|iPod/.test(navigator.userAgent)
+}
+
+const isAndroid = () => {
+  if (typeof window === 'undefined') return false
+  return /Android/.test(navigator.userAgent)
+}
+
+// 检查HTTPS
+const isHTTPS = () => {
+  if (typeof window === 'undefined') return false
+  return location.protocol === 'https:' || location.hostname === 'localhost'
+}
+
+// 检查浏览器支持
+const checkBrowserSupport = () => {
+  if (typeof window === 'undefined') return { supported: false, reason: 'SSR' }
+  
+  const hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+  const hasSpeechRecognition = !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
+  
+  if (!hasGetUserMedia) {
+    return { supported: false, reason: 'no-getUserMedia' }
+  }
+  
+  if (!hasSpeechRecognition) {
+    return { supported: false, reason: 'no-speechRecognition' }
+  }
+  
+  // 移动端Safari特殊处理
+  if (isIOS() && !hasSpeechRecognition) {
+    return { supported: false, reason: 'ios-safari-limitation' }
+  }
+  
+  return { supported: true, reason: 'ok' }
+}
 
 export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageProps) {
   const [isRecording, setIsRecording] = useState(false)
@@ -24,6 +69,15 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
   const [audioLevel, setAudioLevel] = useState(0)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [error, setError] = useState<{ type: ErrorType; message: string } | null>(null)
+  const [deviceInfo, setDeviceInfo] = useState<{
+    isMobile: boolean
+    isIOS: boolean
+    isAndroid: boolean
+    isHTTPS: boolean
+    browserSupport: { supported: boolean; reason: string }
+  } | null>(null)
+  const [permissionState, setPermissionState] = useState<'unknown' | 'granted' | 'denied' | 'prompt'>('unknown')
+  const [showMobileGuide, setShowMobileGuide] = useState(false)
 
   const recognitionRef = useRef<any>(null)
   const timerRef = useRef<NodeJS.Timeout | null>(null)
@@ -94,18 +148,66 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
     setError(null)
   }, [])
 
-  useEffect(() => {
-    // 检查浏览器支持
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      setIsSupported(false)
-      showError('not-supported', '您的浏览器不支持语音识别功能，请使用Chrome、Edge或Safari浏览器')
+  // 检查麦克风权限
+  const checkMicrophonePermission = useCallback(async () => {
+    try {
+      const result = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+      setPermissionState(result.state)
+      
+      result.addEventListener('change', () => {
+        setPermissionState(result.state)
+      })
+    } catch (error) {
+      console.log('权限查询不支持，将在录音时检查')
     }
+  }, [])
+
+  useEffect(() => {
+    // 设备检测和兼容性检查
+    const deviceInfo = {
+      isMobile: isMobile(),
+      isIOS: isIOS(),
+      isAndroid: isAndroid(),
+      isHTTPS: isHTTPS(),
+      browserSupport: checkBrowserSupport()
+    }
+    
+    setDeviceInfo(deviceInfo)
+    
+    console.log('设备信息:', deviceInfo)
+
+    // HTTPS检查
+    if (!deviceInfo.isHTTPS) {
+      setIsSupported(false)
+      showError('https-required', '录音功能需要HTTPS安全连接。请确保网站使用https://开头的地址访问。')
+      return
+    }
+
+    // 浏览器支持检查
+    if (!deviceInfo.browserSupport.supported) {
+      setIsSupported(false)
+      let errorMessage = '您的浏览器不支持语音识别功能'
+      
+      if (deviceInfo.isIOS) {
+        errorMessage = 'iOS Safari对语音识别支持有限，建议使用Chrome浏览器或手动输入文字'
+        setShowMobileGuide(true)
+      } else if (deviceInfo.isMobile) {
+        errorMessage = '移动端建议使用Chrome浏览器以获得最佳体验'
+        setShowMobileGuide(true)
+      } else {
+        errorMessage = '请使用Chrome、Edge或Safari浏览器'
+      }
+      
+      showError(deviceInfo.isMobile ? 'mobile-not-supported' : 'not-supported', errorMessage)
+    }
+
+    // 权限检查
+    checkMicrophonePermission()
 
     return () => {
       cleanup()
     }
-  }, [cleanup, showError])
+  }, [cleanup, showError, checkMicrophonePermission])
 
   const startTimer = useCallback(() => {
     if (timerRef.current) return
@@ -169,6 +271,12 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
     recognition.interimResults = true
     recognition.lang = "zh-CN"
 
+    // 移动端优化设置
+    if (deviceInfo?.isMobile) {
+      recognition.continuous = false // 移动端建议关闭连续识别
+      recognition.interimResults = false // 移动端关闭中间结果以提高稳定性
+    }
+
     recognition.onresult = (event: any) => {
       let finalTranscript = ""
 
@@ -189,13 +297,22 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
       
       switch (event.error) {
         case "not-allowed":
-          showError('permission', '需要麦克风权限才能使用语音功能，请在浏览器设置中允许访问麦克风')
+          showError('permission', '需要麦克风权限才能使用语音功能。请点击浏览器地址栏的🔒图标，选择"允许"麦克风访问。')
           break
         case "network":
           showError('network', '网络连接问题，请检查网络后重试')
           break
         case "no-speech":
-          // 这个错误可以忽略，不显示给用户
+          // 移动端常见，可以忽略
+          if (deviceInfo?.isMobile) {
+            console.log('移动端no-speech错误，忽略')
+          }
+          break
+        case "audio-capture":
+          showError('permission', '无法访问麦克风，请检查设备权限设置')
+          break
+        case "service-not-allowed":
+          showError('network', '语音服务不可用，请检查网络连接')
           break
         default:
           if (restartAttemptsRef.current < MAX_RESTART_ATTEMPTS) {
@@ -207,20 +324,26 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
     }
 
     recognition.onend = () => {
-      if (isRecording && !isPaused && restartAttemptsRef.current < MAX_RESTART_ATTEMPTS && !isCleaningUpRef.current) {
-        restartAttemptsRef.current++
-        setTimeout(() => {
-          if (recognitionRef.current && isRecording && !isCleaningUpRef.current) {
-            try {
-              recognitionRef.current.start()
-            } catch (error) {
-              console.error("重启语音识别失败:", error)
-              if (restartAttemptsRef.current >= MAX_RESTART_ATTEMPTS) {
-                showError('general', '语音识别连接不稳定，请重新开始')
+      console.log('语音识别结束')
+      
+      // 移动端处理逻辑
+      if (deviceInfo?.isMobile && isRecording && !isPaused) {
+        // 移动端自动重启识别
+        if (restartAttemptsRef.current < MAX_RESTART_ATTEMPTS && !isCleaningUpRef.current) {
+          restartAttemptsRef.current++
+          setTimeout(() => {
+            if (recognitionRef.current && isRecording && !isCleaningUpRef.current) {
+              try {
+                recognitionRef.current.start()
+              } catch (error) {
+                console.error("重启语音识别失败:", error)
+                if (restartAttemptsRef.current >= MAX_RESTART_ATTEMPTS) {
+                  showError('general', '语音识别连接不稳定，请重新开始')
+                }
               }
             }
-          }
-        }, 1000)
+          }, 1000)
+        }
       }
     }
 
@@ -236,14 +359,33 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
     clearError()
     
     try {
+      // 移动端特殊处理
+      if (deviceInfo?.isMobile) {
+        console.log('移动端录音启动流程')
+        
+        // 先显示权限引导
+        if (permissionState === 'denied') {
+          showError('permission', '麦克风权限被拒绝。请在浏览器设置中重新允许麦克风权限，然后刷新页面。')
+          return
+        }
+      }
+
       // 请求麦克风权限
+      console.log('请求麦克风权限...')
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
+          // 移动端优化设置
+          ...(deviceInfo?.isMobile && {
+            sampleRate: 16000,
+            channelCount: 1
+          })
         } 
       })
+      
+      console.log('麦克风权限获取成功')
       streamRef.current = stream
 
       // 设置语音识别
@@ -256,21 +398,31 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
       // 设置音频可视化
       await setupAudioVisualization(stream)
 
+      console.log('启动语音识别...')
       recognition.start()
       setIsRecording(true)
       setIsPaused(false)
       restartAttemptsRef.current = 0
       startTimer()
 
+      // 移动端成功提示
+      if (deviceInfo?.isMobile) {
+        console.log('移动端录音启动成功')
+      }
+
     } catch (error: any) {
       console.error("启动录音失败:", error)
       
       if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-        showError('permission', '需要麦克风权限才能使用语音功能，请在浏览器设置中允许访问麦克风')
+        showError('permission', '需要麦克风权限才能使用语音功能。请在浏览器中点击"允许"按钮，然后重试。')
       } else if (error.name === 'NotFoundError') {
-        showError('general', '未找到可用的麦克风设备')
+        showError('general', '未找到可用的麦克风设备，请检查设备连接')
+      } else if (error.name === 'NotSupportedError') {
+        showError('not-supported', '您的设备不支持录音功能')
+      } else if (error.name === 'SecurityError') {
+        showError('https-required', '录音功能需要安全连接(HTTPS)，请使用https://开头的网址访问')
       } else {
-        showError('general', '启动录音失败，请检查设备和权限设置')
+        showError('general', `启动录音失败: ${error.message || '未知错误'}`)
       }
     }
   }
@@ -357,7 +509,7 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ text }),
-        signal: AbortSignal.timeout(30000), // 30秒超时
+        signal: AbortSignal.timeout(60000), // 移动端增加到60秒超时
       })
 
       if (!response.ok) {
@@ -433,6 +585,10 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
         return <Mic className="w-5 h-5" />
       case 'network':
         return <AlertCircle className="w-5 h-5" />
+      case 'https-required':
+        return <AlertCircle className="w-5 h-5" />
+      case 'mobile-not-supported':
+        return <Smartphone className="w-5 h-5" />
       default:
         return <AlertCircle className="w-5 h-5" />
     }
@@ -444,6 +600,10 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
         return 'bg-yellow-100 border-yellow-400 text-yellow-800'
       case 'network':
         return 'bg-blue-100 border-blue-400 text-blue-800'
+      case 'https-required':
+        return 'bg-red-100 border-red-400 text-red-700'
+      case 'mobile-not-supported':
+        return 'bg-orange-100 border-orange-400 text-orange-800'
       default:
         return 'bg-red-100 border-red-400 text-red-700'
     }
@@ -459,20 +619,70 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
             </div>
             <h2 className="text-2xl font-bold text-gray-800 mb-2">AI正在分析中...</h2>
             <p className="text-gray-600">正在深度理解你的表达内容</p>
+            {deviceInfo?.isMobile && (
+              <p className="text-sm text-gray-500 mt-2">移动端网络可能需要更长时间，请耐心等待</p>
+            )}
           </CardContent>
         </Card>
       </div>
     )
   }
 
-  return (
-    <div className="min-h-screen p-4 bg-gradient-to-br from-orange-200 via-pink-200 to-purple-200">
-      <div className="max-w-4xl mx-auto">
-        {/* 顶部标题区域 */}
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-3">🎙️ 此刻，我感觉想说的是......</h1>
-          <p className="text-xl text-gray-600">想到什么说什么，不用组织语言</p>
-        </div>
+      return (
+      <div className="min-h-screen p-4 bg-gradient-to-br from-orange-200 via-pink-200 to-purple-200">
+        <div className="max-w-4xl mx-auto">
+          {/* 设备信息显示 */}
+          {deviceInfo && (
+            <div className="mb-4 text-center">
+              <div className="inline-flex items-center space-x-2 text-sm text-gray-600 bg-white/50 rounded-lg px-3 py-1">
+                {deviceInfo.isMobile ? <Smartphone className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
+                <span>
+                  {deviceInfo.isMobile ? '移动设备' : '桌面设备'} · 
+                  {deviceInfo.isHTTPS ? '安全连接' : '非安全连接'} · 
+                  {deviceInfo.browserSupport.supported ? '支持录音' : '不支持录音'}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* 顶部标题区域 */}
+          <div className="text-center mb-8">
+            <h1 className="text-4xl font-bold text-gray-800 mb-3">🎙️ 此刻，我感觉想说的是......</h1>
+            <p className="text-xl text-gray-600">想到什么说什么，不用组织语言</p>
+            {deviceInfo?.isMobile && (
+              <p className="text-sm text-orange-600 mt-2">
+                💡 移动端提示：请确保允许浏览器访问麦克风权限
+              </p>
+            )}
+          </div>
+
+          {/* 移动端使用指南 */}
+          {showMobileGuide && (
+            <Card className="mb-6 bg-orange-50 border-orange-200">
+              <CardContent className="p-4">
+                <div className="flex items-start space-x-3">
+                  <Smartphone className="w-5 h-5 text-orange-600 mt-0.5" />
+                  <div>
+                    <h3 className="font-medium text-orange-800 mb-2">移动端使用指南</h3>
+                    <div className="text-sm text-orange-700 space-y-1">
+                      <p>📱 建议使用Chrome或Safari浏览器</p>
+                      <p>🔒 确保使用HTTPS连接（网址以https://开头）</p>
+                      <p>🎤 首次使用需要允许麦克风权限</p>
+                      <p>📝 如果录音有问题，可以使用下方的文字输入功能</p>
+                    </div>
+                  </div>
+                  <Button
+                    onClick={() => setShowMobileGuide(false)}
+                    variant="ghost"
+                    size="sm"
+                    className="text-orange-600 hover:bg-orange-100"
+                  >
+                    <X className="w-4 h-4" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
         {/* 错误提示 */}
         {error && (
@@ -481,9 +691,22 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
             <div className="flex-1">
               <p className="font-medium">{error.message}</p>
               {error.type === 'permission' && (
-                <p className="text-sm mt-2">
-                  💡 解决方法：点击浏览器地址栏的🔒图标，允许麦克风访问权限
-                </p>
+                <div className="text-sm mt-2 space-y-1">
+                  <p>💡 解决方法：</p>
+                  <p>1. 点击浏览器地址栏的🔒图标</p>
+                  <p>2. 选择"允许"麦克风访问权限</p>
+                  <p>3. 刷新页面重试</p>
+                </div>
+              )}
+              {error.type === 'https-required' && (
+                <div className="text-sm mt-2">
+                  <p>💡 请确保网站地址以 https:// 开头</p>
+                </div>
+              )}
+              {error.type === 'mobile-not-supported' && (
+                <div className="text-sm mt-2">
+                  <p>💡 可以使用下方的文字输入功能作为替代</p>
+                </div>
               )}
             </div>
             <Button
@@ -578,6 +801,12 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
                         : "点击开始录音"
                       : "浏览器不支持语音功能"}
               </p>
+              
+              {deviceInfo?.isMobile && !isRecording && (
+                <p className="mt-2 text-sm text-gray-500">
+                  移动端首次录音需要允许麦克风权限
+                </p>
+              )}
             </div>
 
             {/* 语音转文字显示 */}
