@@ -2,7 +2,7 @@
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import type { EmotionData } from "@/app/page"
+import type { EmotionData } from "@/types/emotion"
 import { useState } from "react"
 import {} from "lucide-react"
 import EmotionChart from "./emotion-chart"

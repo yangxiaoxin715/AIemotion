@@ -1,29 +1,7 @@
 // 情绪记录管理器
-import type { EmotionData } from '@/app/page'
+import type { EmotionData, EmotionRecord, SessionInfo, WeeklyReport } from '@/types/emotion'
 
-export interface EmotionRecord {
-  id: string
-  timestamp: string
-  emotionData: EmotionData
-  sessionNumber: number
-  cycleNumber: number
-}
-
-export interface WeeklyReport {
-  startDate: string
-  endDate: string
-  totalSessions: number
-  emotionTrends: Array<{
-    session: number
-    dominantEmotion: string
-    intensity: number
-    date: string
-  }>
-  insights: string[]
-  personalGrowth: string
-  recommendations: string[]
-  progressSummary: string
-}
+// 类型定义已移至 @/types/emotion
 
 export class EmotionTracker {
   private static STORAGE_KEY = 'emotion_records'
@@ -56,7 +34,7 @@ export class EmotionTracker {
   }
 
   // 保存情绪记录
-  static saveRecord(emotionData: EmotionData): { sessionNumber: number; shouldGenerateReport: boolean } {
+  static saveRecord(emotionData: EmotionData): SessionInfo {
     if (typeof window === 'undefined') return { sessionNumber: 1, shouldGenerateReport: false }
 
     try {
@@ -100,10 +78,20 @@ export class EmotionTracker {
 
       console.log(`记录已保存：周期${currentCycle.cycleNumber} - 第${newSessionNumber}次记录${shouldGenerateReport ? ' (将生成报告)' : ''}`)
 
-      return { sessionNumber: newSessionNumber, shouldGenerateReport }
+      return { 
+        sessionNumber: newSessionNumber, 
+        shouldGenerateReport,
+        cycleNumber: currentCycle.cycleNumber,
+        startTime: new Date().toISOString()
+      }
     } catch (error) {
       console.error('保存情绪记录失败:', error)
-      return { sessionNumber: 1, shouldGenerateReport: false }
+      return { 
+        sessionNumber: 1, 
+        shouldGenerateReport: false,
+        cycleNumber: 1,
+        startTime: new Date().toISOString()
+      }
     }
   }
 

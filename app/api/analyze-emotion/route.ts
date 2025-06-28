@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { NextRequest, NextResponse } from 'next/server'
+import { EmotionAnalysisInputSchema, sanitizeText, formatErrorResponse, checkRateLimit, getClientIP, APIError } from '@/lib/validation'
 
 // 初始化OpenAI客户端 - 增加超时时间
 const openai = new OpenAI({
@@ -10,22 +11,34 @@ const openai = new OpenAI({
 
 export async function POST(request: NextRequest) {
   try {
-    // 获取请求体中的文本
-    const { text } = await request.json()
+    // 速率限制检查
+    const clientIP = getClientIP(request)
+    if (!checkRateLimit(clientIP, 10, 60000)) {
+      throw new APIError('请求过于频繁，请稍后再试', 429, 'RATE_LIMIT_EXCEEDED')
+    }
 
-    if (!text || typeof text !== 'string') {
-      return NextResponse.json(
-        { error: '请提供有效的文本内容' },
-        { status: 400 }
-      )
+    // 获取和验证请求体
+    const body = await request.json().catch(() => {
+      throw new APIError('请求体格式错误', 400, 'INVALID_JSON')
+    })
+
+    // 输入验证
+    const validationResult = EmotionAnalysisInputSchema.safeParse(body)
+    if (!validationResult.success) {
+      throw new APIError('输入数据格式错误', 400, 'VALIDATION_ERROR')
+    }
+
+    const { text } = validationResult.data
+    
+    // 文本清理
+    const sanitizedText = sanitizeText(text)
+    if (sanitizedText.length === 0) {
+      throw new APIError('文本内容无效', 400, 'INVALID_TEXT')
     }
 
     // 检查API密钥
     if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json(
-        { error: 'API密钥未配置' },
-        { status: 500 }
-      )
+      throw new APIError('AI服务暂时不可用', 503, 'SERVICE_UNAVAILABLE')
     }
 
     console.log('开始调用OpenAI API...')
@@ -93,7 +106,7 @@ export async function POST(request: NextRequest) {
         },
         {
           role: 'user',
-          content: `请分析：${text}`
+          content: `请分析：${sanitizedText}`
         }
       ],
       temperature: 0.7,
@@ -196,7 +209,7 @@ export async function POST(request: NextRequest) {
 
     // 返回分析结果
     const finalResult = {
-      transcript: text,
+      transcript: sanitizedText,
       emotionWords: analysisResult.emotionWords || [],
       insights: analysisResult.insights || [],
       fourQuestionsAnalysis: analysisResult.fourQuestionsAnalysis || {},
@@ -213,33 +226,22 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('情感分析API错误:', error)
     
-    let errorMessage = '分析过程中出现错误，请稍后重试'
-    let statusCode = 500
-    
+    // OpenAI特定错误处理
     if (error instanceof Error) {
       if (error.message.includes('timeout')) {
-        errorMessage = '网络连接超时，请检查网络或稍后重试'
-        statusCode = 504
+        error = new APIError('网络连接超时，请稍后重试', 504, 'TIMEOUT')
       } else if (error.message.includes('401') || error.message.includes('Invalid API key')) {
-        errorMessage = 'API密钥无效，请检查配置'
-        statusCode = 401
+        error = new APIError('AI服务配置错误', 503, 'SERVICE_ERROR')
       } else if (error.message.includes('insufficient_quota')) {
-        errorMessage = 'API配额不足，请充值后重试'
-        statusCode = 402
+        error = new APIError('AI服务配额不足，请稍后重试', 503, 'QUOTA_EXCEEDED')
       } else if (error.message.includes('model_not_found')) {
-        errorMessage = '模型不可用，请联系管理员'
-        statusCode = 404
+        error = new APIError('AI模型不可用', 503, 'MODEL_UNAVAILABLE')
+      } else if (!error.name || error.name === 'Error') {
+        error = new APIError('AI分析失败，请稍后重试', 500, 'AI_ERROR')
       }
     }
     
-    // 返回错误信息
-    return NextResponse.json(
-      { 
-        error: errorMessage,
-        details: error instanceof Error ? error.message : '未知错误',
-        suggestion: '您可以尝试刷新页面或稍后重试'
-      },
-      { status: statusCode }
-    )
+    const errorResponse = formatErrorResponse(error)
+    return NextResponse.json(errorResponse, { status: errorResponse.statusCode })
   }
 } 

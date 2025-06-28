@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Share2, RotateCcw, Heart, Sparkles } from "lucide-react"
-import type { EmotionData } from "@/app/page"
+import type { EmotionData } from "@/types/emotion"
 
 interface CompletionPageProps {
   onRestart: () => void

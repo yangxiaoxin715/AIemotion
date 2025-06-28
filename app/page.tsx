@@ -2,32 +2,19 @@
 
 import { useState, useEffect } from "react"
 import WelcomePage from "@/components/welcome-page"
-import VoiceExpressionPage from "@/components/voice-expression-page"
+import VoiceExpressionPage from "@/components/voice-expression-page-optimized"
 import AnalysisPage from "@/components/analysis-page"
 import CompletionPage from "@/components/completion-page"
 import WeeklyReportPage from "@/components/weekly-report-page"
 import { EmotionTracker } from "@/lib/emotion-tracker"
-import type { WeeklyReport } from "@/lib/emotion-tracker"
+import type { 
+  EmotionData, 
+  WeeklyReport, 
+  SessionInfo, 
+  AppStep 
+} from "@/types/emotion"
 
-export type AppStep = "welcome" | "expression" | "analysis" | "completion" | "weekly-report"
-
-export interface EmotionData {
-  transcript: string
-  emotionWords: { word: string; count: number }[]
-  insights: string[]
-  fourQuestionsAnalysis: {
-    feeling: string
-    needs: string
-    challenges: string
-    insights: string
-  }
-  growthSummary: {
-    discovered: string
-    reminder: string
-  }
-  suggestedBenefits: string[] // AI建议的好处选项
-  selectedBenefits: string[]  // 用户选择的好处
-}
+// 类型定义已移至 @/types/emotion
 
 
 
@@ -35,7 +22,7 @@ export default function EmotionCoachApp() {
   const [currentStep, setCurrentStep] = useState<AppStep>("welcome")
   const [emotionData, setEmotionData] = useState<EmotionData | null>(null)
   const [weeklyReport, setWeeklyReport] = useState<WeeklyReport | null>(null)
-  const [sessionInfo, setSessionInfo] = useState<{ sessionNumber: number; shouldGenerateReport: boolean } | null>(null)
+  const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null)
 
   // 保存数据到本地存储
   useEffect(() => {
@@ -48,7 +35,7 @@ export default function EmotionCoachApp() {
     setCurrentStep(step)
   }
 
-  const handleEmotionAnalysis = (data: EmotionData, sessionInfo: { sessionNumber: number; shouldGenerateReport: boolean }) => {
+  const handleEmotionAnalysis = (data: EmotionData, sessionInfo: SessionInfo) => {
     setEmotionData(data)
     setSessionInfo(sessionInfo)
     setCurrentStep("analysis")

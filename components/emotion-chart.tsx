@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import type { EmotionData } from "@/app/page"
+import type { EmotionData } from "@/types/emotion"
 
 interface EmotionChartProps {
   emotionData: EmotionData

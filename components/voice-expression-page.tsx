@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Mic, MicOff, RotateCcw, CheckCircle, AlertCircle, X, Smartphone, Monitor } from "lucide-react"
 import AudioWaveform from "@/components/audio-waveform"
 import VoiceTranscriptDisplay from "@/components/voice-transcript-display"
-import type { EmotionData } from "@/app/page"
+import type { EmotionData } from "@/types/emotion"
 import { EmotionTracker } from "@/lib/emotion-tracker"
 
 interface VoiceExpressionPageProps {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import OpenAI from 'openai'
-import type { EmotionRecord, WeeklyReport } from '@/lib/emotion-tracker'
+import type { EmotionRecord, WeeklyReport } from '@/types/emotion'
+import { WeeklyReportInputSchema, formatErrorResponse, checkRateLimit, getClientIP, APIError } from '@/lib/validation'
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -8,13 +9,28 @@ const openai = new OpenAI({
 
 export async function POST(request: NextRequest) {
   try {
-    const { records }: { records: EmotionRecord[] } = await request.json()
+    // 速率限制检查
+    const clientIP = getClientIP(request)
+    if (!checkRateLimit(clientIP, 5, 300000)) { // 5次/5分钟
+      throw new APIError('请求过于频繁，请稍后再试', 429, 'RATE_LIMIT_EXCEEDED')
+    }
 
-    if (!records || records.length !== 7) {
-      return NextResponse.json(
-        { error: '需要提供完整的7次情绪记录' },
-        { status: 400 }
-      )
+    // 获取和验证请求体
+    const body = await request.json().catch(() => {
+      throw new APIError('请求体格式错误', 400, 'INVALID_JSON')
+    })
+
+    // 输入验证
+    const validationResult = WeeklyReportInputSchema.safeParse(body)
+    if (!validationResult.success) {
+      throw new APIError('输入数据格式错误', 400, 'VALIDATION_ERROR')
+    }
+
+    const { records } = validationResult.data
+
+    // 检查API密钥
+    if (!process.env.OPENAI_API_KEY) {
+      throw new APIError('AI服务暂时不可用', 503, 'SERVICE_UNAVAILABLE')
     }
 
     // 构建分析内容
@@ -93,7 +109,7 @@ ${recordsText}
     const result = completion.choices[0]?.message?.content
 
     if (!result) {
-      throw new Error('未能获取AI分析结果')
+      throw new APIError('未能获取AI分析结果', 500, 'AI_NO_RESULT')
     }
 
     // 尝试解析JSON结果
@@ -113,7 +129,7 @@ ${recordsText}
       if (jsonMatch) {
         analysisData = JSON.parse(jsonMatch[0])
       } else {
-        throw new Error('未找到JSON格式的分析结果')
+        throw new APIError('未找到JSON格式的分析结果', 500, 'AI_PARSE_ERROR')
       }
       
       // 验证数据结构
@@ -176,15 +192,23 @@ ${recordsText}
 
     return NextResponse.json(weeklyReport)
 
-  } catch (error: any) {
+  } catch (error) {
     console.error('生成周报失败:', error)
     
-    return NextResponse.json(
-      { 
-        error: '生成情绪周报失败',
-        details: error.message 
-      },
-      { status: 500 }
-    )
+    // OpenAI特定错误处理
+    if (error instanceof Error && !error.name) {
+      if (error.message.includes('timeout')) {
+        error = new APIError('网络连接超时，请稍后重试', 504, 'TIMEOUT')
+      } else if (error.message.includes('401') || error.message.includes('Invalid API key')) {
+        error = new APIError('AI服务配置错误', 503, 'SERVICE_ERROR')
+      } else if (error.message.includes('insufficient_quota')) {
+        error = new APIError('AI服务配额不足，请稍后重试', 503, 'QUOTA_EXCEEDED')
+      } else {
+        error = new APIError('生成周报失败，请稍后重试', 500, 'REPORT_ERROR')
+      }
+    }
+    
+    const errorResponse = formatErrorResponse(error)
+    return NextResponse.json(errorResponse, { status: errorResponse.statusCode })
   }
 }
