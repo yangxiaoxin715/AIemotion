@@ -537,12 +537,41 @@ export default function VoiceExpressionPage({ onComplete }: VoiceExpressionPageP
       showError('network', `⚠️ ${errorMessage}`)
       
       // 如果API调用失败，使用备用分析
+      // 简单的情绪词检测（备用方案）
+      const emotionKeywords = [
+        { words: ["开心", "高兴", "愉快", "快乐", "兴奋"], emotion: "开心" },
+        { words: ["难过", "悲伤", "沮丧", "失落"], emotion: "难过" },
+        { words: ["焦虑", "担心", "紧张", "害怕"], emotion: "焦虑" },
+        { words: ["愤怒", "生气", "恼火", "愤慨"], emotion: "愤怒" },
+        { words: ["疲惫", "累", "疲劳", "疲倦"], emotion: "疲惫" },
+        { words: ["迷茫", "困惑", "不知所措"], emotion: "迷茫" },
+        { words: ["平静", "安静", "淡定"], emotion: "平静" },
+        { words: ["压力", "压抑", "窒息"], emotion: "压力" }
+      ]
+      
+      const detectedEmotions: { word: string; count: number }[] = []
+      const lowerText = text.toLowerCase()
+      
+      emotionKeywords.forEach(({ words, emotion }) => {
+        const count = words.reduce((total, word) => {
+          const matches = (lowerText.match(new RegExp(word, 'g')) || []).length
+          return total + matches
+        }, 0)
+        if (count > 0) {
+          detectedEmotions.push({ word: emotion, count })
+        }
+      })
+      
+      // 如果没有检测到情绪词，使用默认的
+      const finalEmotionWords = detectedEmotions.length > 0 ? detectedEmotions : [
+        { word: "表达", count: 1 },
+        { word: "思考", count: 1 },
+        { word: "感受", count: 1 }
+      ]
+      
       return {
         transcript: text,
-        emotionWords: [
-          { word: "表达", count: 1 },
-          { word: "感受", count: 1 }
-        ],
+        emotionWords: finalEmotionWords,
         insights: [
           "感谢你的真诚分享",
           "每一次表达都是勇敢的开始",
